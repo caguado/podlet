@@ -983,6 +983,18 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn container_cgroups_mode_serializes() -> Result<(), crate::serde::quadlet::Error> {
+        let container = Container {
+            image: String::from("image"),
+            cgroups_mode: Some(String::from("enabled")),
+            ..Container::default()
+        };
+        let output = crate::serde::quadlet::to_string_join_all(container)?;
+        assert!(output.contains("CgroupsMode=enabled"), "{output}");
+        Ok(())
+    }
+
     mod unmask {
         use super::*;
 

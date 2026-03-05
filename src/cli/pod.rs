@@ -7,6 +7,7 @@ use std::{
 
 use clap::{ArgAction, Args, Subcommand, ValueEnum};
 use compose_spec::service::blkio_config::Weight;
+use indexmap::IndexMap;
 use serde::Serialize;
 use smart_default::SmartDefault;
 
@@ -269,6 +270,7 @@ impl From<Create> for quadlet::Pod {
             ip,
             ip6,
             network,
+            network_attachments: IndexMap::default(),
             network_alias,
             podman_args: (!podman_args.is_empty()).then_some(podman_args),
             pod_name,

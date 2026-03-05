@@ -5,7 +5,7 @@ use std::{net::IpAddr, time::Duration};
 
 use color_eyre::eyre::ensure;
 use compose_spec::{
-    Extensions, Identifier, ItemOrList, ListOrMap, MapKey, ShortOrLong, StringOrNumber,
+    Identifier, ItemOrList, ListOrMap, MapKey, ShortOrLong, StringOrNumber,
     service::{
         AbsolutePath, BlkioConfig, Build, ByteValue, Cgroup, Command, ConfigOrSecret, CpuSet, Cpus,
         CredentialSpec, Deploy, Develop, Device, EnvFile, Expose, Extends, Healthcheck, Hostname,
@@ -115,13 +115,15 @@ impl From<compose_spec::Service> for Service {
             volumes,
             volumes_from,
             working_dir,
-            extensions,
+            // Service-level extensions are extracted by the compose conversion layer before
+            // this conversion is called.
+            extensions: _,
         }: compose_spec::Service,
     ) -> Self {
         let Logging {
             driver: log_driver,
             options: log_options,
-            extensions: logging_extensions,
+            extensions: _,
         } = logging.unwrap_or_default();
 
         Self {
@@ -139,11 +141,9 @@ impl From<compose_spec::Service> for Service {
                 external_links,
                 isolation,
                 links,
-                logging_extensions,
                 profiles,
                 scale,
                 volumes_from,
-                extensions,
             },
             quadlet: Quadlet {
                 cap_add,
@@ -234,11 +234,9 @@ pub struct Unsupported {
     external_links: IndexSet<Link>,
     isolation: Option<String>,
     links: IndexSet<Link>,
-    logging_extensions: Extensions,
     profiles: IndexSet<Identifier>,
     scale: Option<u64>,
     volumes_from: IndexSet<VolumesFrom>,
-    extensions: Extensions,
 }
 
 impl Unsupported {
@@ -262,11 +260,9 @@ impl Unsupported {
             external_links,
             isolation,
             links,
-            logging_extensions,
             profiles,
             scale,
             volumes_from,
-            extensions,
         } = self;
 
         let unsupported_options = [
@@ -293,10 +289,8 @@ impl Unsupported {
             ensure!(not_present, "`{option}` is not supported");
         }
 
-        ensure!(
-            logging_extensions.is_empty() && extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Logging extensions and service-level extensions are either handled by the extension
+        // registry (service extensions) or silently ignored (logging extensions).
 
         Ok(())
     }

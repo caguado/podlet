@@ -296,10 +296,8 @@ impl TryFrom<service::Build> for Build {
         ensure!(entitlements.is_empty(), "`entitlements` are not supported");
         ensure!(!privileged, "`privileged` is not supported");
         ensure!(secrets.is_empty(), "`secrets` are not supported");
-        ensure!(
-            extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Inner-level extensions are not handled; ignore them.
+        let _ = extensions;
 
         let file = dockerfile
             .map(|dockerfile| match dockerfile {

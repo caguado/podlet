@@ -101,14 +101,11 @@ impl TryFrom<compose_spec::Volume> for Volume {
             driver_opts,
             labels,
             name,
-            extensions,
+            extensions: _,
         }: compose_spec::Volume,
     ) -> Result<Self, Self::Error> {
         ensure!(name.is_none(), "`name` is not supported");
-        ensure!(
-            extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Extensions are handled by the caller via ExtensionRegistry; ignore them here.
 
         let options: Vec<Opt> = driver_opts
             .into_iter()

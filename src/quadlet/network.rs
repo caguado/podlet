@@ -111,14 +111,14 @@ impl TryFrom<compose_spec::Network> for Network {
             internal,
             labels,
             name,
-            extensions,
+            extensions: _,
         }: compose_spec::Network,
     ) -> Result<Self, Self::Error> {
         let Ipam {
             driver: ipam_driver,
             config: ipam_config,
             options: ipam_options,
-            extensions: ipam_extensions,
+            extensions: _,
         } = ipam.unwrap_or_default();
 
         let unsupported_options = [
@@ -129,10 +129,7 @@ impl TryFrom<compose_spec::Network> for Network {
         for (option, not_present) in unsupported_options {
             ensure!(not_present, "`{option}` is not supported");
         }
-        ensure!(
-            extensions.is_empty() && ipam_extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Extensions are handled by the caller via ExtensionRegistry; ignore them here.
 
         let network = Self {
             driver: driver.map(Into::into),
@@ -157,13 +154,11 @@ impl TryFrom<compose_spec::Network> for Network {
                     ip_range,
                     gateway,
                     aux_addresses,
-                    extensions,
+                    extensions: _,
                 },
             )| {
                 if !aux_addresses.is_empty() {
                     Err(eyre!("`aux_addresses` is not supported"))
-                } else if !extensions.is_empty() {
-                    Err(eyre!("compose extensions are not supported"))
                 } else {
                     network.subnet.extend(subnet);
                     network.ip_range.extend(ip_range.map(Into::into));

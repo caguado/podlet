@@ -1,5 +1,7 @@
+pub mod extensions;
+
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, IsTerminal},
     iter, mem,
@@ -12,13 +14,16 @@ use color_eyre::{
     eyre::{OptionExt, WrapErr, bail, ensure, eyre},
 };
 use compose_spec::{
-    Identifier, Network, Networks, Options, Resource, Service, Volumes, service::Command,
+    Extensions, Identifier, Network, Networks, Options, Resource, Service, Volumes,
+    service::Command,
 };
 use indexmap::IndexMap;
 
 use crate::quadlet::{self, GenericSections, Globals, container::volume::Source};
 
 use super::{Build, Container, File, GlobalArgs, k8s};
+
+use self::extensions::ExtensionRegistry;
 
 /// Converts a [`Command`] into a [`Vec<String>`], splitting the [`String`](Command::String) variant
 /// as a shell would.
@@ -62,6 +67,12 @@ pub struct Compose {
     #[arg(long, conflicts_with = "pod")]
     pub kube: bool,
 
+    /// Disable a compose extension by key (repeatable).
+    ///
+    /// The extension will be treated as known (no warning) but its handler will be skipped.
+    #[arg(long = "disable-extension", value_name = "KEY")]
+    pub disable_extension: Vec<String>,
+
     /// The compose file to convert
     ///
     /// If `-` or not provided and stdin is not a terminal,
@@ -89,6 +100,7 @@ impl Compose {
         let Self {
             pod,
             kube,
+            disable_extension,
             compose_file,
         } = self;
 
@@ -136,6 +148,18 @@ impl Compose {
                 extensions,
             } = compose;
 
+            // Build the extension registry.
+            let disabled_keys: HashSet<String> = disable_extension.into_iter().collect();
+            let registry = ExtensionRegistry::new(disabled_keys);
+
+            // Pre-flight check: x-pods and --pod are mutually exclusive.
+            let has_x_pods = extensions.contains_key("x-pods");
+            ensure!(
+                !(pod && has_x_pods),
+                "`--pod` and `x-pods` extension cannot be used together; \
+                 use one or the other to define pod topology"
+            );
+
             let pod_name = pod
                 .then(|| name.ok_or_eyre("`name` is required when using `--pod`"))
                 .transpose()?
@@ -147,13 +171,14 @@ impl Compose {
                 secrets.values().all(Resource::is_external),
                 "only external `secrets` are supported",
             );
-            ensure!(
-                extensions.is_empty(),
-                "compose extensions are not supported"
-            );
 
-            parts_try_into_files(services, networks, volumes, pod_name, sections)
-                .wrap_err("error converting compose file into Quadlet files")
+            // Warn about unrecognized top-level extensions.
+            registry.warn_unknown("compose", &extensions);
+
+            parts_try_into_files(
+                services, networks, volumes, extensions, pod_name, sections, &registry,
+            )
+            .wrap_err("error converting compose file into Quadlet files")
         }
     }
 }
@@ -243,13 +268,25 @@ fn read_from_stdin(options: &Options) -> color_eyre::Result<compose_spec::Compos
 ///
 /// Returns an error if a [`Service`], [`Network`], or [`Volume`](compose_spec::Volume) could not be
 /// converted into a [`quadlet::File`].
+#[allow(clippy::too_many_arguments)]
 fn parts_try_into_files(
     services: IndexMap<Identifier, Service>,
     networks: Networks,
     volumes: Volumes,
+    compose_extensions: Extensions,
     pod_name: Option<String>,
     sections: GenericSections,
+    registry: &ExtensionRegistry,
 ) -> color_eyre::Result<Vec<File>> {
+    // Build the extension context from top-level extensions.
+    let compose = compose_spec::Compose {
+        extensions: compose_extensions,
+        ..Default::default()
+    };
+    let mut context = registry
+        .build_context(&compose)
+        .wrap_err("error building compose extension context")?;
+
     // Get a map of volumes to whether the volume has options associated with it for use in
     // converting a service into a Quadlet file. Extra volume options must be specified in a
     // separate Quadlet file which is referenced from the container Quadlet file.
@@ -264,39 +301,55 @@ fn parts_try_into_files(
         })
         .collect();
 
+    // Process each resource kind separately to avoid overlapping mutable borrows of context.
     let mut pod_ports = Vec::new();
-    let mut files = services_try_into_quadlet_files(
+    let mut files: Vec<File> = services_try_into_quadlet_files(
         services,
         &sections,
         &volume_has_options,
         pod_name.as_deref(),
         &mut pod_ports,
+        &mut context,
+        registry,
     )
-    .chain(networks_try_into_quadlet_files(networks, &sections))
-    .chain(volumes_try_into_quadlet_files(volumes, &sections))
-    .map(|result| result.map(Into::into))
-    .collect::<Result<Vec<File>, _>>()?;
+    .map(|r| r.map(Into::into))
+    .collect::<Result<_, _>>()?;
+
+    let network_files: Vec<File> =
+        networks_try_into_quadlet_files(networks, &sections, &mut context, registry)
+            .map(|r| r.map(Into::into))
+            .collect::<Result<_, _>>()?;
+    files.extend(network_files);
+
+    let volume_files: Vec<File> =
+        volumes_try_into_quadlet_files(volumes, &sections, &mut context, registry)
+            .map(|r| r.map(Into::into))
+            .collect::<Result<_, _>>()?;
+    files.extend(volume_files);
 
     if let Some(name) = pod_name {
-        let GenericSections {
-            unit,
-            quadlet,
-            install,
-        } = sections;
         let pod = quadlet::Pod {
             publish_port: pod_ports,
             ..quadlet::Pod::default()
         };
         let pod = quadlet::File {
             name,
-            unit,
+            unit: sections.unit.clone(),
             resource: pod.into(),
             globals: Globals::default(),
-            quadlet,
+            quadlet: sections.quadlet,
             service: quadlet::Service::default(),
-            install,
+            install: sections.install.clone(),
         };
         files.push(pod.into());
+    }
+
+    // Append any extra files from extension handlers (e.g., pod files from x-pods).
+    let extra = registry
+        .compose_files(&context, Some(&sections.install))
+        .wrap_err("error generating extension compose files")?;
+    for f in extra {
+        files.push(f.into());
     }
 
     Ok(files)
@@ -317,6 +370,7 @@ fn parts_try_into_files(
 /// [`Dependency`](compose_spec::service::Dependency) to the [`Unit`], converting the
 /// [`Build`](compose_spec::service::Build) section into a [`quadlet::Build`] file, or converting
 /// the [`Service`] into a [`quadlet::Container`] file.
+#[allow(clippy::too_many_arguments)]
 fn services_try_into_quadlet_files<'a>(
     services: IndexMap<Identifier, Service>,
     sections @ GenericSections {
@@ -327,6 +381,8 @@ fn services_try_into_quadlet_files<'a>(
     volume_has_options: &'a HashMap<Identifier, bool>,
     pod_name: Option<&'a str>,
     pod_ports: &'a mut Vec<String>,
+    context: &'a mut extensions::ExtensionContext,
+    registry: &'a ExtensionRegistry,
 ) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> + 'a {
     services.into_iter().flat_map(move |(name, mut service)| {
         if service.image.is_some() && service.build.is_some() {
@@ -365,6 +421,8 @@ fn services_try_into_quadlet_files<'a>(
             volume_has_options,
             pod_name,
             pod_ports,
+            context,
+            registry,
         );
 
         iter::once(container).chain(build)
@@ -385,6 +443,7 @@ fn services_try_into_quadlet_files<'a>(
 /// Returns an error if there was an error [adding](Unit::add_dependency()) a service
 /// [`Dependency`](compose_spec::service::Dependency) to the [`Unit`] or converting the [`Service`]
 /// into a [`quadlet::Container`].
+#[allow(clippy::too_many_arguments)]
 fn service_try_into_quadlet_file(
     mut service: Service,
     name: Identifier,
@@ -396,6 +455,8 @@ fn service_try_into_quadlet_file(
     volume_has_options: &HashMap<Identifier, bool>,
     pod_name: Option<&str>,
     pod_ports: &mut Vec<String>,
+    context: &mut extensions::ExtensionContext,
+    registry: &ExtensionRegistry,
 ) -> color_eyre::Result<quadlet::File> {
     // Add any service dependencies to the [Unit] section of the Quadlet file.
     let dependencies = mem::take(&mut service.depends_on).into_long();
@@ -417,6 +478,11 @@ fn service_try_into_quadlet_file(
     let global_args = GlobalArgs::from_compose(&mut service);
 
     let restart = service.restart;
+
+    // Extract service extensions before conversion.
+    let service_extensions = mem::take(&mut service.extensions);
+    // Warn about unrecognized service-level extensions.
+    registry.warn_unknown(&format!("service `{name}`"), &service_extensions);
 
     let mut container = Container::try_from(service)
         .map(quadlet::Container::from)
@@ -445,7 +511,7 @@ fn service_try_into_quadlet_file(
         name.into()
     };
 
-    Ok(quadlet::File {
+    let mut file = quadlet::File {
         name,
         unit,
         resource: container.into(),
@@ -453,7 +519,16 @@ fn service_try_into_quadlet_file(
         quadlet,
         service: restart.map(Into::into).unwrap_or_default(),
         install,
-    })
+    };
+
+    // Apply service extensions via the registry.
+    if !service_extensions.is_empty() {
+        registry
+            .apply_service(&file.name.clone(), &service_extensions, context, &mut file)
+            .wrap_err_with(|| format!("error applying extensions for service `{}`", file.name))?;
+    }
+
+    Ok(file)
 }
 
 /// Attempt to convert compose [`Networks`] into an [`Iterator`] of [`quadlet::File`]s.
@@ -462,14 +537,16 @@ fn service_try_into_quadlet_file(
 ///
 /// The [`Iterator`] returns an [`Err`] if a [`Network`] could not be converted into a
 /// [`quadlet::Network`].
-fn networks_try_into_quadlet_files(
+fn networks_try_into_quadlet_files<'a>(
     networks: Networks,
     GenericSections {
         unit,
         quadlet,
         install,
-    }: &GenericSections,
-) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> {
+    }: &'a GenericSections,
+    context: &'a mut extensions::ExtensionContext,
+    registry: &'a ExtensionRegistry,
+) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> + 'a {
     networks.into_iter().map(move |(name, network)| {
         let network = match network {
             Some(Resource::Compose(network)) => network,
@@ -478,19 +555,35 @@ fn networks_try_into_quadlet_files(
                 bail!("external networks (`{name}`) are not supported");
             }
         };
+
+        // Extract network extensions before conversion.
+        let net_extensions = network.extensions.clone();
+        // Warn about unrecognized network-level extensions.
+        registry.warn_unknown(&format!("network `{name}`"), &net_extensions);
+
         let network = quadlet::Network::try_from(network).wrap_err_with(|| {
             format!("error converting network `{name}` into a Quadlet network")
         })?;
 
-        Ok(quadlet::File {
-            name: name.into(),
+        let file_name = name.as_str().to_owned();
+        let mut file = quadlet::File {
+            name: file_name.clone(),
             unit: unit.clone(),
             resource: network.into(),
             globals: Globals::default(),
             quadlet: *quadlet,
             service: quadlet::Service::default(),
             install: install.clone(),
-        })
+        };
+
+        // Apply network extensions via the registry.
+        if !net_extensions.is_empty() {
+            registry
+                .apply_network(&file_name, &net_extensions, context, &mut file)
+                .wrap_err_with(|| format!("error applying extensions for network `{name}`"))?;
+        }
+
+        Ok(file)
     })
 }
 
@@ -503,34 +596,283 @@ fn networks_try_into_quadlet_files(
 ///
 /// The [`Iterator`] returns an [`Err`] if a [`Volume`](compose_spec::Volume) could not be converted
 /// to a [`quadlet::Volume`].
-fn volumes_try_into_quadlet_files(
+fn volumes_try_into_quadlet_files<'a>(
     volumes: Volumes,
     GenericSections {
         unit,
         quadlet,
         install,
-    }: &GenericSections,
-) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> {
+    }: &'a GenericSections,
+    context: &'a mut extensions::ExtensionContext,
+    registry: &'a ExtensionRegistry,
+) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> + 'a {
     volumes.into_iter().filter_map(move |(name, volume)| {
         volume.and_then(|volume| match volume {
-            Resource::Compose(volume) => (!volume.is_empty()).then(|| {
-                quadlet::Volume::try_from(volume)
-                    .wrap_err_with(|| {
+            Resource::Compose(volume) => {
+                let vol_extensions = volume.extensions.clone();
+                // Warn about unrecognized volume-level extensions.
+                registry.warn_unknown(&format!("volume `{name}`"), &vol_extensions);
+
+                // A volume with only extensions is not empty per `is_empty()`, but should not
+                // produce a quadlet file if extensions are the only content.
+                let has_non_extension_options = {
+                    let mut v2 = volume.clone();
+                    v2.extensions = IndexMap::default();
+                    !v2.is_empty()
+                };
+
+                if !has_non_extension_options && vol_extensions.is_empty() {
+                    return None;
+                }
+
+                Some((|| -> color_eyre::Result<quadlet::File> {
+                    let quadlet_volume = quadlet::Volume::try_from(volume).wrap_err_with(|| {
                         format!("error converting volume `{name}` into a Quadlet volume")
-                    })
-                    .map(|volume| quadlet::File {
-                        name: name.into(),
+                    })?;
+
+                    let file_name = name.as_str().to_owned();
+                    let mut file = quadlet::File {
+                        name: file_name.clone(),
                         unit: unit.clone(),
-                        resource: volume.into(),
+                        resource: quadlet_volume.into(),
                         globals: Globals::default(),
                         quadlet: *quadlet,
                         service: quadlet::Service::default(),
                         install: install.clone(),
-                    })
-            }),
+                    };
+
+                    // Apply volume extensions via the registry.
+                    if !vol_extensions.is_empty() {
+                        registry
+                            .apply_volume(&file_name, &vol_extensions, context, &mut file)
+                            .wrap_err_with(|| {
+                                format!("error applying extensions for volume `{name}`")
+                            })?;
+                    }
+
+                    Ok(file)
+                })())
+            }
             Resource::External { .. } => {
                 Some(Err(eyre!("external volumes (`{name}`) are not supported")))
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quadlet::{self, JoinOption};
+
+    /// Convert a compose YAML string and return a map of file name → serialized quadlet text.
+    fn convert_compose_yaml(
+        yaml: &str,
+        compose_args: Compose,
+        install: Option<quadlet::Install>,
+    ) -> color_eyre::Result<HashMap<String, String>> {
+        let mut options = compose_spec::Compose::options();
+        options.apply_merge(true);
+        let compose = options.from_yaml_str(yaml).wrap_err("parse")?;
+        compose.validate_all().wrap_err("validate")?;
+
+        let compose_spec::Compose {
+            version: _,
+            name,
+            include,
+            services,
+            networks,
+            volumes,
+            configs,
+            secrets,
+            extensions,
+        } = compose;
+
+        let disabled_keys: HashSet<String> = compose_args.disable_extension.into_iter().collect();
+        let registry = ExtensionRegistry::new(disabled_keys);
+
+        let _ = name;
+        ensure!(include.is_empty(), "`include` is not supported");
+        ensure!(configs.is_empty(), "`configs` is not supported");
+        ensure!(
+            secrets.values().all(Resource::is_external),
+            "only external `secrets` are supported"
+        );
+
+        let sections = GenericSections {
+            unit: quadlet::Unit::default(),
+            quadlet: quadlet::Quadlet::default(),
+            install: install.unwrap_or_default(),
+        };
+        let files = parts_try_into_files(
+            services, networks, volumes, extensions, None, sections, &registry,
+        )?;
+
+        let join_opts = JoinOption::all_set();
+        let mut result = HashMap::new();
+        for file in files {
+            if let File::Quadlet(qf) = &file {
+                let text = qf.serialize_to_quadlet(&join_opts).wrap_err("serialize")?;
+                result.insert(qf.name.clone(), text);
+            }
+        }
+        Ok(result)
+    }
+
+    #[test]
+    fn compose_extensions_observability() -> color_eyre::Result<()> {
+        let yaml = fs::read_to_string("../podman-compose-spec/examples/compose.yaml")
+            .expect("podman-compose-spec examples must be present");
+
+        let install = Some(quadlet::Install {
+            wanted_by: vec!["default.target".to_owned()],
+            required_by: Vec::new(),
+        });
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+
+        let files = convert_compose_yaml(&yaml, compose_args, install)?;
+
+        // Verify 5 files were generated.
+        assert_eq!(
+            files.len(),
+            5,
+            "expected 5 files, got: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+
+        // --- observability.pod ---
+        let pod = files.get("observability").expect("observability pod file");
+        assert!(pod.contains("PodName=observability"), "{pod}");
+        assert!(
+            pod.contains("Network=observability-landing.network:ip=100.64.49.10"),
+            "{pod}"
+        );
+        assert!(
+            pod.contains("UserNS=auto:uidmapping=0:505120:1024,gidmapping=0:505120:1024"),
+            "{pod}"
+        );
+        assert!(pod.contains("Requires=local-fs.target"), "{pod}");
+        assert!(pod.contains("After=local-fs.target"), "{pod}");
+        assert!(pod.contains("WantedBy=default.target"), "{pod}");
+
+        // --- observability-grafana.container ---
+        let grafana = files
+            .get("observability-grafana")
+            .expect("grafana container file");
+        assert!(grafana.contains("Pod=observability.pod"), "{grafana}");
+        assert!(
+            grafana.contains("ContainerName=observability-grafana"),
+            "{grafana}"
+        );
+        assert!(grafana.contains("Image=grafana/grafana:12.2"), "{grafana}");
+        assert!(grafana.contains("CgroupsMode=enabled"), "{grafana}");
+        assert!(grafana.contains("WantedBy=default.target"), "{grafana}");
+
+        // --- observability-prometheus.container ---
+        let prometheus = files
+            .get("observability-prometheus")
+            .expect("prometheus container file");
+        assert!(prometheus.contains("Pod=observability.pod"), "{prometheus}");
+        assert!(
+            prometheus.contains("ContainerName=observability-prometheus"),
+            "{prometheus}"
+        );
+        assert!(
+            prometheus.contains("Image=prom/prometheus:v3.7.3"),
+            "{prometheus}"
+        );
+        assert!(prometheus.contains("CgroupsMode=enabled"), "{prometheus}");
+        assert!(
+            prometheus.contains("WantedBy=default.target"),
+            "{prometheus}"
+        );
+        // prometheus has user/group from compose spec
+        assert!(prometheus.contains("User=1000"), "{prometheus}");
+        assert!(prometheus.contains("Group=1000"), "{prometheus}");
+
+        // --- observability-landing.network ---
+        let network = files
+            .get("observability-landing")
+            .expect("observability-landing network file");
+        assert!(network.contains("DisableDNS=true"), "{network}");
+        assert!(network.contains("Driver=pond-netns"), "{network}");
+        assert!(network.contains("Internal=true"), "{network}");
+        assert!(network.contains("Subnet=100.64.49.0/24"), "{network}");
+        assert!(
+            network.contains("Requires=openvswitch.service"),
+            "{network}"
+        );
+        assert!(network.contains("After=openvswitch.service"), "{network}");
+
+        // --- observability-prometheus-data.volume ---
+        let volume = files
+            .get("observability-prometheus-data")
+            .expect("observability-prometheus-data volume file");
+        assert!(volume.contains("User=506120"), "{volume}");
+        assert!(volume.contains("Group=506120"), "{volume}");
+        assert!(
+            volume.contains("Requires=local-fs.target observability-landing-network.service"),
+            "{volume}"
+        );
+        assert!(
+            volume.contains("After=local-fs.target observability-landing-network.service"),
+            "{volume}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn compose_no_extensions_unchanged() -> color_eyre::Result<()> {
+        let yaml = r#"
+services:
+  web:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+networks:
+  default:
+    driver: bridge
+"#;
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        // Should produce 1 container file; network with only driver=bridge produces a file.
+        assert!(files.contains_key("web"), "web container missing");
+        let web = files.get("web").expect("Missing web service definition");
+        assert!(web.contains("Image=nginx:latest"), "{web}");
+        Ok(())
+    }
+
+    #[test]
+    fn compose_disable_extension_x_podman() -> color_eyre::Result<()> {
+        let yaml = "
+services:
+  app:
+    image: myapp:latest
+    x-podman:
+      cgroups: enabled
+";
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: vec!["x-podman".to_owned()],
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        assert!(files.contains_key("app"), "app container missing");
+        let app = files.get("app").expect("Missing app service definition");
+        // CgroupsMode should NOT be set since x-podman is disabled.
+        assert!(!app.contains("CgroupsMode="), "{app}");
+        Ok(())
+    }
 }

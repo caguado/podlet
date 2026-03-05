@@ -5,7 +5,7 @@ pub mod image;
 mod install;
 pub mod kube;
 mod network;
-mod pod;
+pub mod pod;
 mod service;
 mod unit;
 mod volume;

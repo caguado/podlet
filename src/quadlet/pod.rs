@@ -1,14 +1,41 @@
 use std::{
+    fmt::Write as _,
     net::{Ipv4Addr, Ipv6Addr},
     path::PathBuf,
 };
 
-use serde::Serialize;
+use indexmap::IndexMap;
+use serde::{Serialize, Serializer};
 
 use super::{
     Downgrade, DowngradeError, HostPaths, PodmanVersion, ResourceKind,
     container::{Dns, Volume},
 };
+
+/// Network attachment options for a pod.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct PodNetworkOptions {
+    /// Static IPv4 address for this network attachment.
+    pub ip: Option<Ipv4Addr>,
+}
+
+/// Serialize `network_attachments` as repeated `Network=<name>.network[:ip=<addr>]` entries.
+fn serialize_network_attachments<S: Serializer>(
+    attachments: &IndexMap<String, PodNetworkOptions>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let strings: Vec<String> = attachments
+        .iter()
+        .map(|(name, opts)| {
+            let mut s = format!("{name}.network");
+            if let Some(ip) = opts.ip {
+                let _ = write!(s, ":ip={ip}");
+            }
+            s
+        })
+        .collect();
+    strings.serialize(serializer)
+}
 
 /// Options for the \[Pod\] section of a `.pod` Quadlet file.
 #[derive(Serialize, Debug, Default, Clone, PartialEq)]
@@ -43,6 +70,16 @@ pub struct Pod {
 
     /// Specify a custom network for the pod.
     pub network: Vec<String>,
+
+    /// Named network attachments with options (e.g., static IP).
+    ///
+    /// Serialized as `Network=<name>.network[:ip=<addr>]` entries.
+    #[serde(
+        rename = "Network",
+        serialize_with = "serialize_network_attachments",
+        skip_serializing_if = "IndexMap::is_empty"
+    )]
+    pub network_attachments: IndexMap<String, PodNetworkOptions>,
 
     /// Add a network-scoped alias for the pod.
     pub network_alias: Vec<String>,
@@ -178,5 +215,52 @@ impl Pod {
         } else {
             podman_args.push_str(arg);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pod_network_attachments_serializes_with_ip() -> Result<(), crate::serde::quadlet::Error> {
+        let mut pod = Pod::default();
+        pod.network_attachments.insert(
+            "obs".to_owned(),
+            PodNetworkOptions {
+                ip: Some("10.0.0.1".parse().expect("valid IP")),
+            },
+        );
+        let output = crate::serde::quadlet::to_string_join_all(pod)?;
+        assert!(
+            output.contains("Network=obs.network:ip=10.0.0.1"),
+            "{output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pod_network_attachments_serializes_without_ip() -> Result<(), crate::serde::quadlet::Error> {
+        let mut pod = Pod::default();
+        pod.network_attachments
+            .insert("obs".to_owned(), PodNetworkOptions::default());
+        let output = crate::serde::quadlet::to_string_join_all(pod)?;
+        assert!(output.contains("Network=obs.network"), "{output}");
+        assert!(!output.contains(":ip="), "{output}");
+        Ok(())
+    }
+
+    #[test]
+    fn pod_user_ns_serializes() -> Result<(), crate::serde::quadlet::Error> {
+        let pod = Pod {
+            user_ns: Some("auto:uidmapping=0:1000:1024".to_owned()),
+            ..Pod::default()
+        };
+        let output = crate::serde::quadlet::to_string_join_all(pod)?;
+        assert!(
+            output.contains("UserNS=auto:uidmapping=0:1000:1024"),
+            "{output}"
+        );
+        Ok(())
     }
 }

@@ -179,10 +179,8 @@ impl TryFrom<mount::Volume> for Volume {
             consistency.is_none(),
             "`consistency` volume option is not supported"
         );
-        ensure!(
-            extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Inner-level extensions are not handled; ignore them.
+        let _ = extensions;
 
         let mut options = Options::try_from(volume.unwrap_or_default())?;
         options.read_only = read_only;
@@ -215,10 +213,8 @@ impl TryFrom<Bind> for Volume {
             consistency.is_none(),
             "`consistency` volume option is not supported"
         );
-        ensure!(
-            extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Inner-level extensions are not handled; ignore them.
+        let _ = extensions;
 
         let mut options = Options::try_from(bind.unwrap_or_default())?;
         options.read_only = read_only;
@@ -583,10 +579,8 @@ impl TryFrom<VolumeOptions> for Options {
             subpath.is_none(),
             "`subpath` volume option is not supported"
         );
-        ensure!(
-            extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Inner-level extensions are not handled; ignore them.
+        let _ = extensions;
 
         Ok(Self {
             no_copy,
@@ -610,10 +604,8 @@ impl TryFrom<BindOptions> for Options {
             !create_host_path,
             "`create_host_path` bind mount option is not supported"
         );
-        ensure!(
-            extensions.is_empty(),
-            "compose extensions are not supported"
-        );
+        // Inner-level extensions are not handled; ignore them.
+        let _ = extensions;
 
         Ok(Self {
             bind_propagation: propagation.map_or_else(BindPropagation::default, Into::into),

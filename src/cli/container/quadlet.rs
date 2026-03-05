@@ -861,10 +861,8 @@ impl TryFrom<service::Healthcheck> for Healthcheck {
                 start_interval,
                 extensions,
             }) => {
-                ensure!(
-                    extensions.is_empty(),
-                    "compose extensions are not supported"
-                );
+                // Inner-level extensions are not handled; ignore them.
+                let _ = extensions;
                 Ok(Self {
                     health_cmd: test
                         .map(|test| match test {
@@ -941,10 +939,8 @@ fn tmpfs_try_into_short(
         consistency.is_none(),
         "`consistency` volume option is not supported"
     );
-    ensure!(
-        extensions.is_empty(),
-        "compose extensions are not supported"
-    );
+    // Inner-level extensions are not handled; ignore them.
+    let _ = extensions;
 
     let TmpfsOptions {
         size,
@@ -952,10 +948,8 @@ fn tmpfs_try_into_short(
         extensions,
     } = tmpfs.unwrap_or_default();
 
-    ensure!(
-        extensions.is_empty(),
-        "compose extensions are not supported"
-    );
+    // Inner-level extensions are not handled; ignore them.
+    let _ = extensions;
 
     let mut tmpfs = target.as_path().display().to_string();
 
@@ -1074,10 +1068,8 @@ fn network_options(
         priority.is_none(),
         "network `priority` option is not supported"
     );
-    ensure!(
-        extensions.is_empty(),
-        "compose extensions are not supported"
-    );
+    // Inner-level extensions are not handled; ignore them.
+    let _ = extensions;
 
     let ip_addrs = ipv4_address
         .map(IpAddr::from)

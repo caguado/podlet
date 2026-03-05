@@ -102,6 +102,16 @@ impl Unit {
             && part_of.is_empty()
     }
 
+    /// Add a `Requires=` entry to the unit.
+    pub fn add_requires(&mut self, unit: String) {
+        self.requires.push(unit);
+    }
+
+    /// Add an `After=` entry to the unit.
+    pub fn add_after(&mut self, unit: String) {
+        self.after.push(unit);
+    }
+
     /// Add a compose [`Service`](compose_spec::Service) [`Dependency`] to the unit.
     ///
     /// # Errors
