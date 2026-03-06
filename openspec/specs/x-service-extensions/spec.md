@@ -4,7 +4,7 @@
 The system SHALL implement `XPodServiceHandler` which, in `handle_service`, extracts `x-pod` from the service's extensions, deserializes it to `XPodService { name: String }`, and:
 1. Sets `container.pod = Some(format!("{}.pod", pod_name))`.
 2. Prefixes the quadlet file name with `<pod_name>-`.
-3. Looks up `pod_name` in `ExtensionContext::pods` and propagates `systemd_wanted_by` to the file's `install.wanted_by`.
+3. Looks up `pod_name` in `ExtensionContext::pods` and propagates `ResolvedPod.wanted_by` (sourced from `x-systemd.Install.WantedBy`) to the file's `install.wanted_by`.
 4. Removes published ports from the container and registers them on the pod (same as the existing `--pod` behavior).
 
 If `x-pod.name` does not match any key in `ExtensionContext::pods`, the system SHALL return an error.
@@ -14,7 +14,7 @@ If `x-pod.name` does not match any key in `ExtensionContext::pods`, the system S
 - **THEN** the generated `.container` file contains `Pod=observability.pod` and the file is named `observability-grafana.container`
 
 #### Scenario: WantedBy is propagated from pod definition to container
-- **WHEN** the `observability` pod has `x-systemd.wanted-by: [default.target]`
+- **WHEN** the `observability` pod has `x-systemd.Install.WantedBy: [default.target]`
 - **THEN** the `grafana` container quadlet has `WantedBy=default.target` in its `[Install]` section
 
 #### Scenario: Unknown pod name in x-pod returns an error

@@ -112,6 +112,21 @@ impl Unit {
         self.after.push(unit);
     }
 
+    /// Add a `Wants=` entry to the unit.
+    pub fn add_wants(&mut self, unit: String) {
+        self.wants.push(unit);
+    }
+
+    /// Add a `Before=` entry to the unit.
+    pub fn add_before(&mut self, unit: String) {
+        self.before.push(unit);
+    }
+
+    /// Add a `BindsTo=` entry to the unit.
+    pub fn add_binds_to(&mut self, unit: String) {
+        self.binds_to.push(unit);
+    }
+
     /// Add a compose [`Service`](compose_spec::Service) [`Dependency`] to the unit.
     ///
     /// # Errors

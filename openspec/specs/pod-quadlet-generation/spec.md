@@ -36,7 +36,7 @@ The existing `network: Vec<String>` field SHALL be retained for raw mode strings
 The system SHALL implement `XPodsHandler::compose_files` which, for each `ResolvedPod` in `ExtensionContext::pods`, produces a `quadlet::File` with:
 - `name`: the pod name.
 - `resource`: `quadlet::Resource::Pod(...)` with `pod_name = Some(pod_name)`, `user_ns` set from `ResolvedPod.user_ns`, `network_attachments` built from `ResolvedPod.networks`.
-- `unit`: `Some(Unit { requires: resolved_pod.systemd_requires, after: resolved_pod.systemd_after, ... })` if either list is non-empty.
+- `unit`: `ResolvedPod.unit` — populated by `apply_unit_directives` from the `Unit` section of `x-systemd` — set to `Some(Unit { ... })` if any Unit directives were present.
 - `install`: `Some(Install { wanted_by: resolved_pod.systemd_wanted_by, ... })` if `wanted_by` is non-empty.
 
 #### Scenario: Full pod quadlet is generated from x-pods definition

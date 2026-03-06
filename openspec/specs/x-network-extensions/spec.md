@@ -15,19 +15,28 @@ The existing `disable_dns` field on `quadlet::Network` SHALL be used; no new fie
 
 ---
 
-### Requirement: x-systemd on a network populates [Unit] Requires= and After=
-The system SHALL implement `XSystemdHandler::handle_network` which extracts `x-systemd` from the network's extensions and appends its `requires` and `after` lists to the `unit.requires` and `unit.after` fields of the `quadlet::File`.
+### Requirement: x-systemd on a network uses an INI-section map and populates the corresponding quadlet sections
+The system SHALL implement `XSystemdHandler::handle_network` which extracts `x-systemd` from the network's extensions and deserializes it as an `XSystemdMap` (a two-level map of INI section name → directive name → `SystemdDirectiveValue`). Each directive is applied to the matching section of the generated `quadlet::File`:
 
-If the file has no `[Unit]` section yet, one SHALL be created.
+- `Unit.*` directives are applied to `file.unit` via `apply_unit_directives`. Recognised keys: `Requires`, `After`, `Wants`, `Before`, `BindsTo`. Unknown keys are silently ignored.
+- `Install.*` directives are applied to `file.install` via `apply_install_directives`. Recognised keys: `WantedBy`, `RequiredBy`. Unknown keys are silently ignored.
+
+A `SystemdDirectiveValue` is either a scalar string or a YAML sequence of strings. Sequences are stored as multiple entries in the corresponding `Vec<String>` field and joined by a space when serialized to INI.
+
+If the file has no `[Unit]` section yet, one SHALL be created when any `Unit` directive is present.
 
 #### Scenario: Requires= and After= are emitted from x-systemd
-- **WHEN** a network has `x-systemd.requires: [openvswitch.service]` and `x-systemd.after: [openvswitch.service]`
+- **WHEN** a network has `x-systemd.Unit.Requires: [openvswitch.service]` and `x-systemd.Unit.After: [openvswitch.service]`
 - **THEN** the generated `.network` file has `Requires=openvswitch.service` and `After=openvswitch.service` in its `[Unit]` section
 
-#### Scenario: x-systemd with only after= is valid
-- **WHEN** a network has `x-systemd.after: [openvswitch.service]` but no `requires`
+#### Scenario: x-systemd with only After is valid
+- **WHEN** a network has `x-systemd.Unit.After: [openvswitch.service]` but no `Requires`
 - **THEN** the `.network` file has `After=openvswitch.service` and no `Requires=` line
 
-#### Scenario: Multiple units in requires are all emitted
-- **WHEN** a network has `x-systemd.requires: [a.service, b.service]`
-- **THEN** the `.network` file contains both `Requires=a.service` and `Requires=b.service`
+#### Scenario: Sequence directive values are joined with a space
+- **WHEN** a network has `x-systemd.Unit.Requires: [a.service, b.service]`
+- **THEN** the `.network` file contains `Requires=a.service b.service` in the `[Unit]` section
+
+#### Scenario: Install.WantedBy is written to [Install]
+- **WHEN** a network has `x-systemd.Install.WantedBy: [multi-user.target]`
+- **THEN** the `.network` file contains `WantedBy=multi-user.target` in its `[Install]` section

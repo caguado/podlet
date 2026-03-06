@@ -10,10 +10,10 @@ When `x-pods` is present in the compose file, services that do NOT declare `x-po
 ---
 
 ### Requirement: WantedBy in container [Install] comes from the pod definition
-Container quadlets assigned to a pod via `x-pod` SHALL inherit their `[Install] WantedBy=` exclusively from the pod's `x-systemd.wanted-by` list. Any `--install`/`--wanted-by` values passed on the CLI SHALL be ignored for pod-member containers when `x-pod` is present.
+Container quadlets assigned to a pod via `x-pod` SHALL inherit their `[Install] WantedBy=` exclusively from the pod's `x-systemd.Install.WantedBy` value. Any `--install`/`--wanted-by` values passed on the CLI SHALL be ignored for pod-member containers when `x-pod` is present.
 
 #### Scenario: WantedBy from pod overrides CLI install options
-- **WHEN** `--wanted-by multi-user.target` is passed on CLI but the pod has `x-systemd.wanted-by: [default.target]`
+- **WHEN** `--wanted-by multi-user.target` is passed on CLI but the pod has `x-systemd.Install.WantedBy: [default.target]`
 - **THEN** the container quadlet has `WantedBy=default.target`, not `WantedBy=multi-user.target`
 
 ---

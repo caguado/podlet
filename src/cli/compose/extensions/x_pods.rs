@@ -6,7 +6,10 @@ use serde::Deserialize;
 
 use crate::quadlet::{self, Unit, pod::PodNetworkOptions};
 
-use super::{ComposeExtensionHandler, ExtensionContext, ResolvedPod};
+use super::{
+    ComposeExtensionHandler, ExtensionContext, ResolvedPod,
+    x_systemd::{XSystemdMap, apply_unit_directives},
+};
 
 /// Extension key processed by this handler.
 const KEY: &str = "x-pods";
@@ -54,17 +57,18 @@ impl ComposeExtensionHandler for XPodsHandler {
                 pod.user_ns = x_podman.userns;
             }
 
-            // Build [Unit] section from x-systemd.
+            // Build [Unit] section and extract Install.WantedBy from x-systemd.
             let (unit, wanted_by) = if let Some(x_systemd) = definition.x_systemd {
                 let mut unit = Unit::default();
-                for req in x_systemd.requires {
-                    unit.add_requires(req);
-                }
-                for after in x_systemd.after {
-                    unit.add_after(after);
-                }
-                let wanted_by = x_systemd.wanted_by;
-                let unit = if unit.is_empty() { None } else { Some(unit) };
+                apply_unit_directives(&x_systemd, &mut unit);
+                let unit = (!unit.is_empty()).then_some(unit);
+
+                let wanted_by = x_systemd
+                    .get("Install")
+                    .and_then(|s| s.get("WantedBy"))
+                    .map(|v| v.clone().into_values())
+                    .unwrap_or_default();
+
                 (unit, wanted_by)
             } else {
                 (None, Vec::new())
@@ -122,7 +126,7 @@ struct PodDefinition {
     #[serde(rename = "x-podman", default)]
     x_podman: Option<XPodmanOnPod>,
     #[serde(rename = "x-systemd", default)]
-    x_systemd: Option<XSystemdOnPod>,
+    x_systemd: Option<XSystemdMap>,
 }
 
 /// Network attachment with optional static IP.
@@ -135,17 +139,6 @@ struct PodNetworkAttachment {
 #[derive(Deserialize)]
 struct XPodmanOnPod {
     userns: Option<String>,
-}
-
-/// Pod-level `x-systemd` options.
-#[derive(Deserialize, Default)]
-struct XSystemdOnPod {
-    #[serde(default)]
-    requires: Vec<String>,
-    #[serde(default)]
-    after: Vec<String>,
-    #[serde(rename = "wanted-by", default)]
-    wanted_by: Vec<String>,
 }
 
 #[cfg(test)]
@@ -171,9 +164,11 @@ x-pods:
     x-podman:
       userns: "auto:uidmapping=0:1000:1024"
     x-systemd:
-      requires: [local-fs.target]
-      after: [local-fs.target]
-      wanted-by: [default.target]
+      Unit:
+        Requires: [local-fs.target]
+        After: [local-fs.target]
+      Install:
+        WantedBy: [default.target]
 "#;
         let compose = make_compose_with_xpods(yaml);
         let registry = ExtensionRegistry::default();
@@ -203,7 +198,8 @@ services: {}
 x-pods:
   testpod:
     x-systemd:
-      wanted-by: [multi-user.target]
+      Install:
+        WantedBy: [multi-user.target]
 ";
         let compose = make_compose_with_xpods(yaml);
         let registry = ExtensionRegistry::default();
