@@ -160,10 +160,14 @@ impl Compose {
                  use one or the other to define pod topology"
             );
 
+            let name: Option<String> = name.map(Into::into);
             let pod_name = pod
-                .then(|| name.ok_or_eyre("`name` is required when using `--pod`"))
-                .transpose()?
-                .map(Into::into);
+                .then(|| {
+                    name.clone()
+                        .ok_or_eyre("`name` is required when using `--pod`")
+                })
+                .transpose()?;
+            let compose_name = name;
 
             ensure!(include.is_empty(), "`include` is not supported");
             ensure!(configs.is_empty(), "`configs` is not supported");
@@ -176,7 +180,14 @@ impl Compose {
             registry.warn_unknown("compose", &extensions);
 
             parts_try_into_files(
-                services, networks, volumes, extensions, pod_name, sections, &registry,
+                services,
+                networks,
+                volumes,
+                extensions,
+                pod_name,
+                sections,
+                compose_name,
+                &registry,
             )
             .wrap_err("error converting compose file into Quadlet files")
         }
@@ -262,6 +273,11 @@ fn read_from_stdin(options: &Options) -> color_eyre::Result<compose_spec::Compos
         .wrap_err("data from stdin is not a valid compose file")
 }
 
+/// Build a systemd `Description=` string for a compose entity.
+fn make_description(entity_type: &str, project_name: &str) -> String {
+    format!("{entity_type} for pod {project_name}")
+}
+
 /// Attempt to convert [`Service`]s, [`Networks`], and [`Volumes`] into [`File`]s.
 ///
 /// # Errors
@@ -276,6 +292,7 @@ fn parts_try_into_files(
     compose_extensions: Extensions,
     pod_name: Option<String>,
     sections: GenericSections,
+    compose_name: Option<String>,
     registry: &ExtensionRegistry,
 ) -> color_eyre::Result<Vec<File>> {
     // Build the extension context from top-level extensions.
@@ -308,6 +325,7 @@ fn parts_try_into_files(
         &sections,
         &volume_has_options,
         pod_name.as_deref(),
+        compose_name.as_deref(),
         &mut pod_ports,
         &mut context,
         registry,
@@ -315,16 +333,26 @@ fn parts_try_into_files(
     .map(|r| r.map(Into::into))
     .collect::<Result<_, _>>()?;
 
-    let network_files: Vec<File> =
-        networks_try_into_quadlet_files(networks, &sections, &mut context, registry)
-            .map(|r| r.map(Into::into))
-            .collect::<Result<_, _>>()?;
+    let network_files: Vec<File> = networks_try_into_quadlet_files(
+        networks,
+        &sections,
+        compose_name.as_deref(),
+        &mut context,
+        registry,
+    )
+    .map(|r| r.map(Into::into))
+    .collect::<Result<_, _>>()?;
     files.extend(network_files);
 
-    let volume_files: Vec<File> =
-        volumes_try_into_quadlet_files(volumes, &sections, &mut context, registry)
-            .map(|r| r.map(Into::into))
-            .collect::<Result<_, _>>()?;
+    let volume_files: Vec<File> = volumes_try_into_quadlet_files(
+        volumes,
+        &sections,
+        compose_name.as_deref(),
+        &mut context,
+        registry,
+    )
+    .map(|r| r.map(Into::into))
+    .collect::<Result<_, _>>()?;
     files.extend(volume_files);
 
     if let Some(name) = pod_name {
@@ -380,6 +408,7 @@ fn services_try_into_quadlet_files<'a>(
     }: &'a GenericSections,
     volume_has_options: &'a HashMap<Identifier, bool>,
     pod_name: Option<&'a str>,
+    compose_name: Option<&'a str>,
     pod_ports: &'a mut Vec<String>,
     context: &'a mut extensions::ExtensionContext,
     registry: &'a ExtensionRegistry,
@@ -420,6 +449,7 @@ fn services_try_into_quadlet_files<'a>(
             sections.clone(),
             volume_has_options,
             pod_name,
+            compose_name,
             pod_ports,
             context,
             registry,
@@ -454,6 +484,7 @@ fn service_try_into_quadlet_file(
     }: GenericSections,
     volume_has_options: &HashMap<Identifier, bool>,
     pod_name: Option<&str>,
+    compose_name: Option<&str>,
     pod_ports: &mut Vec<String>,
     context: &mut extensions::ExtensionContext,
     registry: &ExtensionRegistry,
@@ -521,6 +552,12 @@ fn service_try_into_quadlet_file(
         install,
     };
 
+    // Auto-populate Description= from the compose project name if not already set.
+    if let Some(project) = compose_name {
+        file.unit
+            .set_description_if_absent(make_description("container", project));
+    }
+
     // Apply service extensions via the registry.
     if !service_extensions.is_empty() {
         registry
@@ -544,6 +581,7 @@ fn networks_try_into_quadlet_files<'a>(
         quadlet,
         install,
     }: &'a GenericSections,
+    compose_name: Option<&'a str>,
     context: &'a mut extensions::ExtensionContext,
     registry: &'a ExtensionRegistry,
 ) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> + 'a {
@@ -576,6 +614,12 @@ fn networks_try_into_quadlet_files<'a>(
             install: install.clone(),
         };
 
+        // Auto-populate Description= from the compose project name if not already set.
+        if let Some(project) = compose_name {
+            file.unit
+                .set_description_if_absent(make_description("network", project));
+        }
+
         // Apply network extensions via the registry.
         if !net_extensions.is_empty() {
             registry
@@ -603,6 +647,7 @@ fn volumes_try_into_quadlet_files<'a>(
         quadlet,
         install,
     }: &'a GenericSections,
+    compose_name: Option<&'a str>,
     context: &'a mut extensions::ExtensionContext,
     registry: &'a ExtensionRegistry,
 ) -> impl Iterator<Item = color_eyre::Result<quadlet::File>> + 'a {
@@ -640,6 +685,12 @@ fn volumes_try_into_quadlet_files<'a>(
                         service: quadlet::Service::default(),
                         install: install.clone(),
                     };
+
+                    // Auto-populate Description= from the compose project name if not already set.
+                    if let Some(project) = compose_name {
+                        file.unit
+                            .set_description_if_absent(make_description("volume", project));
+                    }
 
                     // Apply volume extensions via the registry.
                     if !vol_extensions.is_empty() {
@@ -691,7 +742,7 @@ mod tests {
         let disabled_keys: HashSet<String> = compose_args.disable_extension.into_iter().collect();
         let registry = ExtensionRegistry::new(disabled_keys);
 
-        let _ = name;
+        let compose_name: Option<String> = name.map(Into::into);
         ensure!(include.is_empty(), "`include` is not supported");
         ensure!(configs.is_empty(), "`configs` is not supported");
         ensure!(
@@ -705,7 +756,14 @@ mod tests {
             install: install.unwrap_or_default(),
         };
         let files = parts_try_into_files(
-            services, networks, volumes, extensions, None, sections, &registry,
+            services,
+            networks,
+            volumes,
+            extensions,
+            None,
+            sections,
+            compose_name,
+            &registry,
         )?;
 
         let join_opts = JoinOption::all_set();
@@ -737,11 +795,11 @@ mod tests {
 
         let files = convert_compose_yaml(&yaml, compose_args, install)?;
 
-        // Verify 5 files were generated.
+        // Verify 6 files were generated.
         assert_eq!(
             files.len(),
-            5,
-            "expected 5 files, got: {:?}",
+            6,
+            "expected 6 files, got: {:?}",
             files.keys().collect::<Vec<_>>()
         );
 
@@ -873,6 +931,140 @@ services:
         let app = files.get("app").expect("Missing app service definition");
         // CgroupsMode should NOT be set since x-podman is disabled.
         assert!(!app.contains("CgroupsMode="), "{app}");
+        Ok(())
+    }
+
+    #[test]
+    fn compose_project_name_auto_populates_description() -> color_eyre::Result<()> {
+        let yaml = "
+name: myapp
+services:
+  web:
+    image: nginx:latest
+networks:
+  frontend:
+    driver: bridge
+";
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        let web = files.get("web").expect("web container missing");
+        assert!(
+            web.contains("Description=container for pod myapp"),
+            "expected description in container: {web}"
+        );
+        let network = files.get("frontend").expect("frontend network missing");
+        assert!(
+            network.contains("Description=network for pod myapp"),
+            "expected description in network: {network}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_no_project_name_no_description() -> color_eyre::Result<()> {
+        let yaml = "
+services:
+  web:
+    image: nginx:latest
+";
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        let web = files.get("web").expect("web container missing");
+        assert!(
+            !web.contains("Description="),
+            "unexpected Description= when no compose name: {web}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_service_domain_name_emits_podman_args() -> color_eyre::Result<()> {
+        let yaml = "
+services:
+  app:
+    image: myapp:latest
+    domainname: example.local
+";
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        let app = files.get("app").expect("app container missing");
+        assert!(
+            app.contains("--domainname example.local"),
+            "expected --domainname in PodmanArgs: {app}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_service_without_domain_name_omits_flag() -> color_eyre::Result<()> {
+        let yaml = "
+services:
+  app:
+    image: myapp:latest
+";
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        let app = files.get("app").expect("app container missing");
+        assert!(
+            !app.contains("--domainname"),
+            "unexpected --domainname in output: {app}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compose_volume_name_uses_compose_key_as_file_and_volume_name_in_quadlet()
+    -> color_eyre::Result<()> {
+        let yaml = "
+services:
+  app:
+    image: myapp:latest
+    volumes:
+      - data:/data
+volumes:
+  data:
+    name: app-persistent-data
+    driver: local
+";
+        let compose_args = Compose {
+            pod: false,
+            kube: false,
+            disable_extension: Vec::new(),
+            compose_file: None,
+        };
+        let files = convert_compose_yaml(yaml, compose_args, None)?;
+        // Container still references volume by compose key
+        let app = files.get("app").expect("app container missing");
+        assert!(
+            app.contains("Volume=data.volume:/data"),
+            "container should reference volume by compose key: {app}"
+        );
+        // Volume file has VolumeName= with the custom name
+        let volume = files.get("data").expect("data volume file missing");
+        assert!(
+            volume.contains("VolumeName=app-persistent-data"),
+            "volume file should have VolumeName=: {volume}"
+        );
         Ok(())
     }
 }

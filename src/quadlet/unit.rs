@@ -102,6 +102,13 @@ impl Unit {
             && part_of.is_empty()
     }
 
+    /// Set the `Description=` field if it is not already set.
+    pub fn set_description_if_absent(&mut self, description: String) {
+        if self.description.is_none() {
+            self.description = Some(description);
+        }
+    }
+
     /// Add a `Requires=` entry to the unit.
     pub fn add_requires(&mut self, unit: String) {
         self.requires.push(unit);

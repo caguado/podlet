@@ -160,6 +160,10 @@ pub struct PodmanArgs {
     #[serde(skip_serializing_if = "Not::not")]
     disable_content_trust: bool,
 
+    /// Set the container's custom domain name
+    #[arg(long, value_name = "DOMAIN")]
+    domainname: Option<String>,
+
     /// Preprocess default environment variables for the container
     ///
     /// Can be specified multiple times
@@ -427,6 +431,7 @@ impl TryFrom<compose::PodmanArgs> for PodmanArgs {
             cgroup,
             cgroup_parent,
             device_cgroup_rules,
+            domain_name,
             ipc,
             uts,
             mac_address,
@@ -485,6 +490,7 @@ impl TryFrom<compose::PodmanArgs> for PodmanArgs {
             cpuset_cpus: (!cpuset.is_empty()).then(|| cpuset.to_string()),
             cgroupns: cgroup.as_ref().map(ToString::to_string),
             cgroup_parent: cgroup_parent.map(Into::into),
+            domainname: domain_name.as_ref().map(ToString::to_string),
             device_cgroup_rule: device_cgroup_rules
                 .iter()
                 .map(ToString::to_string)

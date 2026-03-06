@@ -58,6 +58,10 @@ pub struct Network {
     /// command in the generated file, right before the name of the network in the command line.
     pub podman_args: Option<String>,
 
+    /// The (optional) name of the Podman network.
+    #[serde(rename = "NetworkName", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
     /// The subnet in CIDR notation.
     pub subnet: Vec<IpNet>,
 }
@@ -73,6 +77,16 @@ impl Network {
         podman_args.push_str(flag);
         podman_args.push(' ');
         podman_args.push_str(arg);
+    }
+
+    /// Add `--{flag}` (bare flag, no value) to `PodmanArgs=`.
+    fn push_flag(&mut self, flag: &str) {
+        let podman_args = self.podman_args.get_or_insert_with(String::new);
+        if !podman_args.is_empty() {
+            podman_args.push(' ');
+        }
+        podman_args.push_str("--");
+        podman_args.push_str(flag);
     }
 }
 
@@ -121,11 +135,7 @@ impl TryFrom<compose_spec::Network> for Network {
             extensions: _,
         } = ipam.unwrap_or_default();
 
-        let unsupported_options = [
-            ("attachable", !attachable),
-            ("name", name.is_none()),
-            ("ipam.options", ipam_options.is_empty()),
-        ];
+        let unsupported_options = [("ipam.options", ipam_options.is_empty())];
         for (option, not_present) in unsupported_options {
             ensure!(not_present, "`{option}` is not supported");
         }
@@ -133,6 +143,7 @@ impl TryFrom<compose_spec::Network> for Network {
 
         let network = Self {
             driver: driver.map(Into::into),
+            name,
             options: driver_opts
                 .into_iter()
                 .map(|(key, value)| format!("{key}={value}"))
@@ -144,30 +155,39 @@ impl TryFrom<compose_spec::Network> for Network {
             ..Self::default()
         };
 
-        ipam_config.into_iter().enumerate().try_fold(
-            network,
-            |mut network,
-             (
-                index,
-                IpamConfig {
-                    subnet,
-                    ip_range,
-                    gateway,
-                    aux_addresses,
-                    extensions: _,
+        ipam_config
+            .into_iter()
+            .enumerate()
+            .try_fold(
+                network,
+                |mut network,
+                 (
+                    index,
+                    IpamConfig {
+                        subnet,
+                        ip_range,
+                        gateway,
+                        aux_addresses,
+                        extensions: _,
+                    },
+                )| {
+                    if !aux_addresses.is_empty() {
+                        Err(eyre!("`aux_addresses` is not supported"))
+                    } else {
+                        network.subnet.extend(subnet);
+                        network.ip_range.extend(ip_range.map(Into::into));
+                        network.gateway.extend(gateway);
+                        Ok(network)
+                    }
+                    .wrap_err_with(|| format!("error converting `ipam.config[{index}]`"))
                 },
-            )| {
-                if !aux_addresses.is_empty() {
-                    Err(eyre!("`aux_addresses` is not supported"))
-                } else {
-                    network.subnet.extend(subnet);
-                    network.ip_range.extend(ip_range.map(Into::into));
-                    network.gateway.extend(gateway);
-                    Ok(network)
+            )
+            .map(|mut network| {
+                if attachable {
+                    network.push_flag("attachable");
                 }
-                .wrap_err_with(|| format!("error converting `ipam.config[{index}]`"))
-            },
-        )
+                network
+            })
     }
 }
 
@@ -259,6 +279,55 @@ mod tests {
         assert_eq!(
             crate::serde::quadlet::to_string_join_all(network)?,
             "[Network]\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn network_name_emits_network_name_field() -> Result<(), crate::serde::quadlet::Error> {
+        let network = Network {
+            name: Some("my-custom-net".to_owned()),
+            ..Network::default()
+        };
+        let output = crate::serde::quadlet::to_string_join_all(network)?;
+        assert!(
+            output.contains("NetworkName=my-custom-net"),
+            "expected NetworkName= in output: {output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn network_without_name_omits_network_name_field() -> Result<(), crate::serde::quadlet::Error> {
+        let network = Network::default();
+        let output = crate::serde::quadlet::to_string_join_all(network)?;
+        assert!(
+            !output.contains("NetworkName="),
+            "unexpected NetworkName= in output: {output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn network_attachable_true_emits_podman_args_flag() -> Result<(), crate::serde::quadlet::Error>
+    {
+        let mut network = Network::default();
+        network.push_flag("attachable");
+        let output = crate::serde::quadlet::to_string_join_all(network)?;
+        assert!(
+            output.contains("PodmanArgs=--attachable"),
+            "expected --attachable in PodmanArgs: {output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn network_attachable_false_omits_flag() -> Result<(), crate::serde::quadlet::Error> {
+        let network = Network::default();
+        let output = crate::serde::quadlet::to_string_join_all(network)?;
+        assert!(
+            !output.contains("--attachable"),
+            "unexpected --attachable in output: {output}"
         );
         Ok(())
     }

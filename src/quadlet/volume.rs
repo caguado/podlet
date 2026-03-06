@@ -1,6 +1,6 @@
 use std::{ops::Not, path::PathBuf};
 
-use color_eyre::eyre::{Context, ensure};
+use color_eyre::eyre::Context;
 use serde::Serialize;
 
 use crate::{cli::volume::Opt, serde::quadlet::seq_quote_whitespace};
@@ -44,6 +44,10 @@ pub struct Volume {
 
     /// The host (numeric) UID, or user name to use as the owner for the volume.
     pub user: Option<String>,
+
+    /// The (optional) name of the Podman volume.
+    #[serde(rename = "VolumeName", skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl HostPaths for Volume {
@@ -104,7 +108,6 @@ impl TryFrom<compose_spec::Volume> for Volume {
             extensions: _,
         }: compose_spec::Volume,
     ) -> Result<Self, Self::Error> {
-        ensure!(name.is_none(), "`name` is not supported");
         // Extensions are handled by the caller via ExtensionRegistry; ignore them here.
 
         let options: Vec<Opt> = driver_opts
@@ -123,6 +126,7 @@ impl TryFrom<compose_spec::Volume> for Volume {
         Ok(Self {
             driver,
             label: labels.into_list().into_iter().collect(),
+            name,
             ..options.into()
         })
     }
@@ -138,6 +142,31 @@ mod tests {
         assert_eq!(
             crate::serde::quadlet::to_string_join_all(volume)?,
             "[Volume]\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn volume_name_emits_volume_name_field() -> Result<(), crate::serde::quadlet::Error> {
+        let volume = Volume {
+            name: Some("persistent-data".to_owned()),
+            ..Volume::default()
+        };
+        let output = crate::serde::quadlet::to_string_join_all(volume)?;
+        assert!(
+            output.contains("VolumeName=persistent-data"),
+            "expected VolumeName= in output: {output}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn volume_without_name_omits_volume_name_field() -> Result<(), crate::serde::quadlet::Error> {
+        let volume = Volume::default();
+        let output = crate::serde::quadlet::to_string_join_all(volume)?;
+        assert!(
+            !output.contains("VolumeName="),
+            "unexpected VolumeName= in output: {output}"
         );
         Ok(())
     }
